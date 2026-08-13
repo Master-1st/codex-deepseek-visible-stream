@@ -24,15 +24,49 @@ function Invoke-Probe {
 
     Write-Host "Server under test: $ProbeServerPath"
 
-    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
-    $startInfo.FileName = 'powershell.exe'
-    $startInfo.Arguments = (
-        '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ' +
-        '"' + $ProbeServerPath + '"'
+    $cjkPrompt = [string]::Concat(
+        [char]0x4E2D,
+        [char]0x6587,
+        [char]0x77ED,
+        [char]0x63D0,
+        [char]0x793A
     )
+    $messages = @(
+        [ordered]@{
+            jsonrpc = '2.0'
+            id = 2
+            method = 'not_a_real_method'
+            params = [ordered]@{ prompt = $cjkPrompt }
+        }
+    )
+    $jsonLines = $messages | ForEach-Object {
+        $_ | ConvertTo-Json -Depth 8 -Compress
+    }
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    $requestBytes = $utf8NoBom.GetBytes(
+        ($jsonLines -join "`n") + "`n"
+    )
+    $requestPath = Join-Path (
+        [IO.Path]::GetTempPath()
+    ) ('deepseek-utf8-' + [guid]::NewGuid().ToString('N') + '.jsonl')
+    [IO.File]::WriteAllBytes($requestPath, $requestBytes)
+
+    # Process.StandardInput can prepend a UTF-8 BOM on some PowerShell 5.1
+    # hosts even when its BaseStream is used. File redirection preserves the
+    # exact no-BOM bytes that a conforming stdio MCP client sends.
+    $powerShellPath = Join-Path $env:WINDIR (
+        'System32\WindowsPowerShell\v1.0\powershell.exe'
+    )
+    $childCommand = (
+        '"' + $powerShellPath + '" ' +
+        '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ' +
+        '"' + $ProbeServerPath + '" < "' + $requestPath + '"'
+    )
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = Join-Path $env:WINDIR 'System32\cmd.exe'
+    $startInfo.Arguments = '/d /s /c "' + $childCommand + '"'
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
-    $startInfo.RedirectStandardInput = $true
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
 
@@ -41,35 +75,6 @@ function Invoke-Probe {
     [void]$process.Start()
 
     try {
-        $cjkPrompt = [string]::Concat(
-            [char]0x4E2D,
-            [char]0x6587,
-            [char]0x77ED,
-            [char]0x63D0,
-            [char]0x793A
-        )
-        $messages = @(
-            [ordered]@{
-                jsonrpc = '2.0'
-                id = 2
-                method = 'not_a_real_method'
-                params = [ordered]@{ prompt = $cjkPrompt }
-            }
-        )
-        $jsonLines = $messages | ForEach-Object {
-            $_ | ConvertTo-Json -Depth 8 -Compress
-        }
-        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-        $requestBytes = $utf8NoBom.GetBytes(
-            ($jsonLines -join "`n") + "`n"
-        )
-        $process.StandardInput.BaseStream.Write(
-            $requestBytes,
-            0,
-            $requestBytes.Length
-        )
-        $process.StandardInput.BaseStream.Flush()
-
         $responses = New-Object System.Collections.Generic.List[object]
         $deadline = [DateTime]::UtcNow.AddSeconds(5)
         $readTask = $process.StandardOutput.ReadLineAsync()
@@ -99,14 +104,13 @@ function Invoke-Probe {
         return ,$responses.ToArray()
     }
     finally {
-        try { $process.StandardInput.Close() } catch {}
-
         if (-not $process.HasExited) {
             $process.Kill()
             $process.WaitForExit()
         }
 
         $process.Dispose()
+        Remove-Item -LiteralPath $requestPath -Force -ErrorAction SilentlyContinue
     }
 }
 
