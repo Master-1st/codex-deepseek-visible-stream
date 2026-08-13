@@ -1,0 +1,53 @@
+name: validate
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  windows-powershell:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse PowerShell scripts
+        shell: powershell
+        run: |
+          $errorsFound = 0
+          Get-ChildItem -Recurse -Filter '*.ps1' | ForEach-Object {
+            $parseErrors = $null
+            [Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName,
+              [ref]$null,
+              [ref]$parseErrors
+            ) | Out-Null
+
+            if ($parseErrors.Count -gt 0) {
+              $parseErrors | ForEach-Object { Write-Error $_ }
+              $errorsFound++
+            }
+          }
+
+          if ($errorsFound -gt 0) { exit 1 }
+
+      - name: Run raw UTF-8 regression
+        shell: powershell
+        run: |
+          powershell.exe -NoLogo -NoProfile -NonInteractive `
+            -ExecutionPolicy Bypass `
+            -File '.\deepseek-visible-stream\scripts\Test-Utf8-Input-Regression.ps1' `
+            -TargetServerPath '.\deepseek-visible-stream\scripts\source\server.ps1'
+
+      - name: Smoke-test installer output
+        shell: powershell
+        run: |
+          $env:CODEX_HOME = Join-Path $env:RUNNER_TEMP 'codex-home'
+          $env:DEEPSEEK_INSTALL_NO_GUI = '1'
+          powershell.exe -NoLogo -NoProfile -NonInteractive `
+            -ExecutionPolicy Bypass `
+            -File '.\deepseek-visible-stream\scripts\Install-DeepSeek-Visible-Stream-Hotfix3.ps1'
+
+          powershell.exe -NoLogo -NoProfile -NonInteractive `
+            -ExecutionPolicy Bypass `
+            -File '.\deepseek-visible-stream\scripts\Test-Utf8-Input-Regression.ps1' `
+            -TargetServerPath (Join-Path $env:CODEX_HOME 'deepseek-mcp\server.ps1')

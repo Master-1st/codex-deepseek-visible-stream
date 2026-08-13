@@ -1,0 +1,4 @@
+interface:
+  display_name: "DeepSeek Visible Stream"
+  short_description: "Fix and validate DeepSeek MCP streaming on Windows"
+  default_prompt: "Use $deepseek-visible-stream to install or diagnose visible DeepSeek MCP streaming and Chinese UTF-8 prompt timeouts on Windows."
