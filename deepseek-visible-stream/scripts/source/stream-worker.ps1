@@ -171,8 +171,12 @@ $state = @{
     started_at = (Get-Date).ToUniversalTime().ToString('o')
     updated_at = (Get-Date).ToUniversalTime().ToString('o')
     finish_reason = ''
+    max_tokens = $null
+    max_tokens_explicit = $false
+    final_answer_max_chars = $null
     prompt_tokens = $null
     completion_tokens = $null
+    reasoning_tokens = $null
     total_tokens = $null
     error = ''
 }
@@ -205,6 +209,9 @@ try {
 
     $state.model = [string]$requestData.model
     $state.effort = [string]$requestData.reasoning_effort
+    $state.max_tokens = [int]$requestData.max_tokens
+    $state.max_tokens_explicit = [bool]$requestData.max_tokens_explicit
+    $state.final_answer_max_chars = [int]$requestData.final_answer_max_chars
     $state.phase = 'connecting'
     $state.message = 'Connecting to DeepSeek API.'
     Write-State -State $state
@@ -388,6 +395,28 @@ try {
                 $state.completion_tokens = [int64]$chunk.usage.completion_tokens
             }
 
+            $completionDetailsProperty = (
+                $chunk.usage.PSObject.Properties['completion_tokens_details']
+            )
+
+            if (
+                ($null -ne $completionDetailsProperty) -and
+                ($null -ne $chunk.usage.completion_tokens_details)
+            ) {
+                $reasoningTokensProperty = (
+                    $chunk.usage.completion_tokens_details.PSObject.Properties['reasoning_tokens']
+                )
+
+                if (
+                    ($null -ne $reasoningTokensProperty) -and
+                    ($null -ne $chunk.usage.completion_tokens_details.reasoning_tokens)
+                ) {
+                    $state.reasoning_tokens = [int64](
+                        $chunk.usage.completion_tokens_details.reasoning_tokens
+                    )
+                }
+            }
+
             if ($null -ne $chunk.usage.total_tokens) {
                 $state.total_tokens = [int64]$chunk.usage.total_tokens
             }
@@ -490,6 +519,31 @@ try {
         $answer = [string](
             Get-Content -Raw -Encoding UTF8 -LiteralPath $answerPath
         )
+    }
+
+    if ([string]$state.finish_reason -eq 'length') {
+        $state.status = 'incomplete'
+        $state.phase = 'incomplete'
+        $state.elapsed_ms = [int64]$stopwatch.ElapsedMilliseconds
+        $state.error = 'finish_reason=length'
+
+        if ([string]::IsNullOrWhiteSpace($answer)) {
+            $state.message = (
+                'The shared output budget ended during reasoning before final ' +
+                'content was produced. Run one targeted non-thinking ' +
+                'continuation; do not rerun the full reasoning task.'
+            )
+        }
+        else {
+            $state.message = (
+                'The shared output budget ended before a natural stop. The ' +
+                'partial answer was preserved; continue only missing sections ' +
+                'with thinking disabled.'
+            )
+        }
+
+        Write-State -State $state
+        return
     }
 
     if ([string]::IsNullOrWhiteSpace($answer)) {

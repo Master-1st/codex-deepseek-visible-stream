@@ -261,6 +261,19 @@ function Resolve-DeepSeekModel {
         return 'deepseek-v4-pro'
     }
 
+    if (
+        ($TaskType -in @(
+            'writing',
+            'chinese_writing',
+            'translation',
+            'polishing',
+            'summarization'
+        )) -and
+        ($Priority -eq 'quality')
+    ) {
+        return 'deepseek-v4-pro'
+    }
+
     return 'deepseek-v4-flash'
 }
 
@@ -318,6 +331,9 @@ Return an independent, technically rigorous result. Prefer:
 3. Assumptions and uncertainty
 4. Counterexamples / failure modes
 5. Recommended verification
+
+Match the output language requested in the task. For Chinese drafting, translation,
+rewriting, or polishing, produce idiomatic native Chinese while preserving technical terms.
 
 Do not orchestrate Luna or other workers. Do not request or expose credentials.
 The primary Sol agent will compare your answer with local evidence, run validation,
@@ -392,7 +408,11 @@ function New-DeepSeekJob {
         'review',
         'adversarial',
         'long_context',
-        'summarization'
+        'summarization',
+        'writing',
+        'chinese_writing',
+        'translation',
+        'polishing'
     )
 
     if ($taskType -notin $validTaskTypes) {
@@ -438,19 +458,46 @@ function New-DeepSeekJob {
             -DefaultValue $true
     )
 
+    $finalAnswerMaxChars = [int](
+        Get-ArgumentValue `
+            -Object $ArgumentsObject `
+            -Name 'final_answer_max_chars' `
+            -DefaultValue 12000
+    )
+
+    if ($finalAnswerMaxChars -lt 1000) {
+        $finalAnswerMaxChars = 1000
+    }
+
+    if ($finalAnswerMaxChars -gt 60000) {
+        $finalAnswerMaxChars = 60000
+    }
+
+    $maxTokensExplicit = Has-Property `
+        -Object $ArgumentsObject `
+        -Name 'max_tokens'
+
+    $automaticMaxTokens = if (-not $thinking) {
+        16384
+    } elseif ($effort -eq 'max') {
+        65536
+    } else {
+        32768
+    }
+
     $maxTokens = [int](
         Get-ArgumentValue `
             -Object $ArgumentsObject `
             -Name 'max_tokens' `
-            -DefaultValue 12000
+            -DefaultValue $automaticMaxTokens
     )
 
     if ($maxTokens -lt 256) {
         $maxTokens = 256
     }
 
-    if ($maxTokens -gt 32768) {
-        $maxTokens = 32768
+    if ($maxTokens -gt 384000) {
+        $maxTokens = 384000
     }
 
     $systemPrompt = [string](
@@ -463,6 +510,17 @@ function New-DeepSeekJob {
     if ([string]::IsNullOrWhiteSpace($systemPrompt)) {
         $systemPrompt = Get-DefaultSystemPrompt
     }
+
+    $outputContract = @"
+
+Final-answer contract:
+- Return a complete final answer no longer than $finalAnswerMaxChars characters.
+- max_tokens is shared by hidden reasoning and final content; reserve enough budget for final content.
+- Prefer a complete concise answer over an exhaustive answer that is cut off.
+- Cover every requested section before adding optional detail.
+- End the final answer naturally. Never omit the final answer after reasoning.
+"@
+    $systemPrompt = $systemPrompt.TrimEnd() + $outputContract
 
     $jobId = (
         (Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss') +
@@ -483,6 +541,8 @@ function New-DeepSeekJob {
         reasoning_effort = $effort
         thinking = $thinking
         max_tokens = $maxTokens
+        max_tokens_explicit = [bool]$maxTokensExplicit
+        final_answer_max_chars = $finalAnswerMaxChars
         timeout_seconds = 600
     }
 
@@ -511,8 +571,12 @@ function New-DeepSeekJob {
         started_at = (Get-Date).ToUniversalTime().ToString('o')
         updated_at = (Get-Date).ToUniversalTime().ToString('o')
         finish_reason = ''
+        max_tokens = $maxTokens
+        max_tokens_explicit = [bool]$maxTokensExplicit
+        final_answer_max_chars = $finalAnswerMaxChars
         prompt_tokens = $null
         completion_tokens = $null
+        reasoning_tokens = $null
         total_tokens = $null
         error = ''
     }
@@ -543,6 +607,9 @@ function New-DeepSeekJob {
         job_id = $jobId
         model = $model
         effort = $effort
+        max_tokens = $maxTokens
+        max_tokens_explicit = [bool]$maxTokensExplicit
+        final_answer_max_chars = $finalAnswerMaxChars
         pid = $process.Id
         job_directory = $jobDirectory
     }
@@ -616,6 +683,39 @@ function Format-JobProgress {
         ([double]$State.elapsed_ms / 1000.0),
         1
     )
+    $maxTokens = Get-ArgumentValue -Object $State -Name 'max_tokens' -DefaultValue ''
+    $maxTokensExplicit = Get-ArgumentValue -Object $State -Name 'max_tokens_explicit' -DefaultValue ''
+    $finalAnswerMaxChars = Get-ArgumentValue -Object $State -Name 'final_answer_max_chars' -DefaultValue ''
+    $reasoningTokens = Get-ArgumentValue -Object $State -Name 'reasoning_tokens' -DefaultValue ''
+
+    $terminalAnswer = $Answer
+    $terminalAnswerLimit = 24000
+    $answerTotalChars = $terminalAnswer.Length
+    $answerReturnedChars = $answerTotalChars
+    $answerNextOffset = $answerTotalChars
+    $answerEof = $true
+
+    if ($answerTotalChars -gt $terminalAnswerLimit) {
+        $terminalAnswer = $terminalAnswer.Substring(0, $terminalAnswerLimit)
+        $answerReturnedChars = $terminalAnswerLimit
+        $answerNextOffset = $terminalAnswerLimit
+        $answerEof = $false
+    }
+
+    $answerDelivery = (
+        "`nanswer_total_chars=$answerTotalChars" +
+        "`nanswer_returned_chars=$answerReturnedChars" +
+        "`nanswer_next_offset=$answerNextOffset" +
+        "`nanswer_eof=$($answerEof.ToString().ToLowerInvariant())"
+    )
+
+    if (-not $answerEof) {
+        $answerDelivery += (
+            "`nanswer_delivery=chunked; call deepseek_read with " +
+            "offset_chars=$answerNextOffset. Local reads make no API call " +
+            "and consume no DeepSeek tokens."
+        )
+    }
 
     $text = @(
         "DeepSeek JOB $($State.status.ToString().ToUpperInvariant())",
@@ -627,13 +727,16 @@ function Format-JobProgress {
         "elapsed_sec=$elapsedSeconds",
         "reasoning_chars=$($State.reasoning_chars)",
         "answer_chars=$($State.answer_chars)",
+        "max_tokens=$maxTokens",
+        "max_tokens_explicit=$maxTokensExplicit",
+        "final_answer_max_chars=$finalAnswerMaxChars",
         "keepalive_count=$($State.keepalive_count)",
         "message=$($State.message)"
     ) -join "`n"
 
     if (
         (-not [string]::IsNullOrWhiteSpace($Answer)) -and
-        ($State.status -ne 'completed')
+        ($State.status -notin @('completed', 'incomplete'))
     ) {
         $preview = $Answer
 
@@ -655,10 +758,33 @@ function Format-JobProgress {
             "`nfinish_reason=$($State.finish_reason)" +
             "`nprompt_tokens=$($State.prompt_tokens)" +
             "`ncompletion_tokens=$($State.completion_tokens)" +
+            "`nreasoning_tokens=$reasoningTokens" +
             "`ntotal_tokens=$($State.total_tokens)" +
+            $answerDelivery +
             "`n`nDeepSeek CALL OK`n`n" +
-            $Answer
+            $terminalAnswer
         )
+    }
+
+    if ($State.status -eq 'incomplete') {
+        $text += (
+            "`nfinish_reason=$($State.finish_reason)" +
+            "`nprompt_tokens=$($State.prompt_tokens)" +
+            "`ncompletion_tokens=$($State.completion_tokens)" +
+            "`nreasoning_tokens=$reasoningTokens" +
+            "`ntotal_tokens=$($State.total_tokens)" +
+            "`nerror=$($State.error)" +
+            $answerDelivery +
+            "`n`nDeepSeek CALL INCOMPLETE`n" +
+            "The output budget ended before a natural stop. " +
+            "Do not rerun the full reasoning task. If anything is missing, " +
+            "start one targeted continuation with thinking=false and ask only " +
+            "for the missing sections."
+        )
+
+        if (-not [string]::IsNullOrWhiteSpace($Answer)) {
+            $text += "`n`npartial_answer:`n" + $terminalAnswer
+        }
     }
 
     if ($State.status -eq 'failed') {
@@ -740,9 +866,12 @@ function Invoke-DeepSeekStart {
         "job_id=$($job.job_id)`n" +
         "model=$($job.model)`n" +
         "effort=$($job.effort)`n" +
+        "max_tokens=$($job.max_tokens)`n" +
+        "max_tokens_explicit=$($job.max_tokens_explicit)`n" +
+        "final_answer_max_chars=$($job.final_answer_max_chars)`n" +
         "pid=$($job.pid)`n" +
         "Next: call deepseek_poll with this job_id. " +
-        "Use wait_seconds=5 so the user never waits blindly for a long tool call."
+        "Use wait_seconds=30; it returns after 30 seconds or immediately on a terminal state."
     )
 }
 
@@ -764,32 +893,27 @@ function Invoke-DeepSeekPoll {
         Get-ArgumentValue `
             -Object $ArgumentsObject `
             -Name 'wait_seconds' `
-            -DefaultValue 5
+            -DefaultValue 30
     )
 
     if ($waitSeconds -lt 0) {
         $waitSeconds = 0
     }
 
-    if ($waitSeconds -gt 10) {
-        $waitSeconds = 10
+    if ($waitSeconds -gt 30) {
+        $waitSeconds = 30
     }
 
     $initial = Read-JobState -JobId $jobId
-    $initialSeq = [int]$initial.seq
     $deadline = [DateTime]::UtcNow.AddSeconds($waitSeconds)
     $state = $initial
 
     while (
         ([DateTime]::UtcNow -lt $deadline) -and
-        ($state.status -notin @('completed', 'failed', 'cancelled'))
+        ($state.status -notin @('completed', 'incomplete', 'failed', 'cancelled'))
     ) {
         Start-Sleep -Milliseconds 250
         $state = Read-JobState -JobId $jobId
-
-        if ([int]$state.seq -gt $initialSeq) {
-            break
-        }
     }
 
     $answer = Get-AnswerText -JobId $jobId
@@ -798,6 +922,79 @@ function Invoke-DeepSeekPoll {
         -State $state `
         -Answer $answer `
         -PreviewChars 1200
+}
+
+function Invoke-DeepSeekRead {
+    param($ArgumentsObject)
+
+    $jobId = [string](
+        Get-ArgumentValue `
+            -Object $ArgumentsObject `
+            -Name 'job_id' `
+            -DefaultValue ''
+    )
+
+    if ([string]::IsNullOrWhiteSpace($jobId)) {
+        throw 'job_id is required.'
+    }
+
+    $offsetChars = [int](
+        Get-ArgumentValue `
+            -Object $ArgumentsObject `
+            -Name 'offset_chars' `
+            -DefaultValue 0
+    )
+
+    $maxChars = [int](
+        Get-ArgumentValue `
+            -Object $ArgumentsObject `
+            -Name 'max_chars' `
+            -DefaultValue 12000
+    )
+
+    if ($offsetChars -lt 0) {
+        $offsetChars = 0
+    }
+
+    if ($maxChars -lt 1000) {
+        $maxChars = 1000
+    }
+
+    if ($maxChars -gt 24000) {
+        $maxChars = 24000
+    }
+
+    $state = Read-JobState -JobId $jobId
+    $answer = Get-AnswerText -JobId $jobId
+    $totalChars = $answer.Length
+
+    if ($offsetChars -gt $totalChars) {
+        $offsetChars = $totalChars
+    }
+
+    $remainingChars = $totalChars - $offsetChars
+    $returnedChars = [math]::Min($maxChars, $remainingChars)
+    $chunk = ''
+
+    if ($returnedChars -gt 0) {
+        $chunk = $answer.Substring($offsetChars, $returnedChars)
+    }
+
+    $nextOffset = $offsetChars + $returnedChars
+    $eof = ($nextOffset -ge $totalChars)
+
+    return (
+        "DeepSeek LOCAL ANSWER CHUNK`n" +
+        "job_id=$jobId`n" +
+        "status=$($state.status)`n" +
+        "offset_chars=$offsetChars`n" +
+        "returned_chars=$returnedChars`n" +
+        "total_chars=$totalChars`n" +
+        "next_offset=$nextOffset`n" +
+        "eof=$($eof.ToString().ToLowerInvariant())`n" +
+        "api_tokens_charged=0`n`n" +
+        $chunk
+    )
 }
 
 function Invoke-DeepSeekCancel {
@@ -816,7 +1013,7 @@ function Invoke-DeepSeekCancel {
 
     $state = Read-JobState -JobId $jobId
 
-    if ($state.status -in @('completed', 'failed', 'cancelled')) {
+    if ($state.status -in @('completed', 'incomplete', 'failed', 'cancelled')) {
         return (
             "DeepSeek job is already terminal: " +
             "job_id=$jobId status=$($state.status)"
@@ -855,8 +1052,12 @@ function Invoke-DeepSeekCancel {
         started_at = [string]$state.started_at
         updated_at = (Get-Date).ToUniversalTime().ToString('o')
         finish_reason = ''
+        max_tokens = Get-ArgumentValue -Object $state -Name 'max_tokens' -DefaultValue $null
+        max_tokens_explicit = Get-ArgumentValue -Object $state -Name 'max_tokens_explicit' -DefaultValue $false
+        final_answer_max_chars = Get-ArgumentValue -Object $state -Name 'final_answer_max_chars' -DefaultValue $null
         prompt_tokens = $state.prompt_tokens
         completion_tokens = $state.completion_tokens
+        reasoning_tokens = Get-ArgumentValue -Object $state -Name 'reasoning_tokens' -DefaultValue $null
         total_tokens = $state.total_tokens
         error = ''
     }
@@ -881,7 +1082,7 @@ function Invoke-DeepSeekConsultCompatibility {
         Start-Sleep -Seconds 1
         $state = Read-JobState -JobId $jobId
 
-        if ($state.status -in @('completed', 'failed', 'cancelled')) {
+        if ($state.status -in @('completed', 'incomplete', 'failed', 'cancelled')) {
             $answer = Get-AnswerText -JobId $jobId
             return Format-JobProgress -State $state -Answer $answer -PreviewChars 1200
         }
@@ -912,7 +1113,11 @@ $commonProperties = [ordered]@{
             'review',
             'adversarial',
             'long_context',
-            'summarization'
+            'summarization',
+            'writing',
+            'chinese_writing',
+            'translation',
+            'polishing'
         )
         default = 'analysis'
     }
@@ -947,8 +1152,22 @@ $commonProperties = [ordered]@{
     max_tokens = [ordered]@{
         type = 'integer'
         minimum = 256
-        maximum = 32768
+        maximum = 384000
+        description = @'
+Optional hard ceiling shared by hidden reasoning and final content. Omit it for the
+automatic 16K/32K/64K budget selected from thinking and reasoning effort. Set it
+only when the user explicitly wants a stricter cost ceiling.
+'@
+    }
+    final_answer_max_chars = [ordered]@{
+        type = 'integer'
+        minimum = 1000
+        maximum = 60000
         default = 12000
+        description = @'
+Desired maximum final-answer length in characters. This controls answer verbosity
+without starving hidden reasoning of the shared max_tokens budget.
+'@
     }
     system_prompt = [ordered]@{
         type = 'string'
@@ -961,7 +1180,7 @@ $startTool = [ordered]@{
     description = @'
 Preferred DeepSeek invocation for any task that may take more than a few seconds.
 Starts a true SSE streaming request in a background worker and returns immediately with a job_id.
-Then call deepseek_poll every few seconds. This avoids a long opaque MCP tool call.
+Then call deepseek_poll with its 30-second long-poll default. It returns early only for a terminal state.
 Do not expose raw reasoning_content; progress reports only show phase and reasoning character count.
 '@
     inputSchema = [ordered]@{
@@ -982,10 +1201,11 @@ $pollTool = [ordered]@{
     name = 'deepseek_poll'
     title = 'Poll DeepSeek Streaming Job'
     description = @'
-Poll a DeepSeek streaming job. Returns within at most wait_seconds (0-10).
-Shows queued/connecting/waiting_for_inference/thinking/answering/completed,
+Poll a DeepSeek streaming job. Returns within at most wait_seconds (0-30).
+Shows queued/connecting/waiting_for_inference/thinking/answering/completed/incomplete,
 elapsed time, keepalive count, reasoning character count, answer character count,
-and a tail preview once the final answer starts streaming. On completion returns the full final answer.
+and a tail preview once the final answer starts streaming. A terminal result returns up
+to 24,000 answer characters plus answer_next_offset for zero-API-token local paging.
 '@
     inputSchema = [ordered]@{
         type = 'object'
@@ -997,8 +1217,45 @@ and a tail preview once the final answer starts streaming. On completion returns
             wait_seconds = [ordered]@{
                 type = 'integer'
                 minimum = 0
-                maximum = 10
-                default = 5
+                maximum = 30
+                default = 30
+            }
+        }
+        required = @('job_id')
+    }
+    annotations = [ordered]@{
+        readOnlyHint = $true
+        destructiveHint = $false
+        idempotentHint = $true
+        openWorldHint = $false
+    }
+}
+
+$readTool = [ordered]@{
+    name = 'deepseek_read'
+    title = 'Read DeepSeek Answer Chunk'
+    description = @'
+Read a bounded chunk from the locally persisted answer for a job. This never calls
+the DeepSeek API and consumes no DeepSeek tokens. Use it when a completed answer is
+larger than one MCP/tool-output window, following answer_next_offset until eof=true.
+'@
+    inputSchema = [ordered]@{
+        type = 'object'
+        additionalProperties = $false
+        properties = [ordered]@{
+            job_id = [ordered]@{
+                type = 'string'
+            }
+            offset_chars = [ordered]@{
+                type = 'integer'
+                minimum = 0
+                default = 0
+            }
+            max_chars = [ordered]@{
+                type = 'integer'
+                minimum = 1000
+                maximum = 24000
+                default = 12000
             }
         }
         required = @('job_id')
@@ -1072,13 +1329,21 @@ Prefer deepseek_start + deepseek_poll so the user can see progress instead of wa
 }
 
 $serverInstructions = @'
-DeepSeek V4 Worker is a peer of Codex Luna Worker under the primary GPT-5.6 Sol thread.
-Sol owns planning, decomposition, synthesis, local edits, verification, and final answer.
-Use Luna for local repository/tool execution.
+DeepSeek V4 Worker and Codex Luna Worker are specialists under the primary GPT-5.6 Sol thread.
+Sol owns intent, planning, permission decisions, decomposition, synthesis, verification, and the final answer.
+Route local repository/tool execution and bounded mechanical work to Luna.
+Route low-cost checks and routine independent analysis to DeepSeek V4 Flash.
+Route mathematics, algorithms, architecture, complex debugging, adversarial review, and critical research to DeepSeek V4 Pro.
+Route Chinese drafting, rewriting, translation, polishing, and summarization to DeepSeek by default: Flash for routine work, Pro for quality-first, academic, or critical text.
 For DeepSeek, prefer deepseek_start followed by deepseek_poll rather than the synchronous deepseek_consult.
-After deepseek_start returns, tell the user the job has started. Poll with wait_seconds=5.
-Give a compact visible progress update on phase changes or about every 10-15 seconds.
-Do not expose raw reasoning_content; report reasoning_chars and phase only.
+After deepseek_start returns, tell the user the job has started. Poll with wait_seconds=30.
+Give a compact visible progress update on phase changes or about every 30 seconds.
+Omit max_tokens unless the user explicitly requests a hard cost ceiling; the router selects a safe dynamic budget.
+Use final_answer_max_chars to control answer verbosity without starving hidden reasoning.
+Treat status=incomplete or finish_reason=length as incomplete, never as a successful final answer.
+If continuation is needed, request only missing sections with thinking=false; never rerun the full reasoning task automatically.
+If answer_eof=false, page through deepseek_read from answer_next_offset. It reads the local file and spends no DeepSeek tokens.
+Do not expose raw reasoning_content; report reasoning_chars, reasoning_tokens, and phase only.
 When phase becomes answering, partial_final_answer_tail may be surfaced if useful.
 Never create Luna-to-DeepSeek or DeepSeek-to-Luna recursive chains.
 '@
@@ -1134,7 +1399,7 @@ while ($true) {
                             }
                             serverInfo = [ordered]@{
                                 name = 'deepseek-v4-worker'
-                                version = '3.3.3-0813-hotfix3-utf8-raw'
+                                version = '3.4.0-0813-codex-router-budget'
                             }
                             instructions = $serverInstructions
                         }
@@ -1163,6 +1428,7 @@ while ($true) {
                             tools = @(
                                 $startTool,
                                 $pollTool,
+                                $readTool,
                                 $cancelTool,
                                 $statusTool,
                                 $compatTool
@@ -1207,6 +1473,11 @@ while ($true) {
 
                         'deepseek_poll' {
                             Invoke-DeepSeekPoll -ArgumentsObject $argumentsObject
+                            break
+                        }
+
+                        'deepseek_read' {
+                            Invoke-DeepSeekRead -ArgumentsObject $argumentsObject
                             break
                         }
 

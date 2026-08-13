@@ -1,37 +1,36 @@
 # 标题
 
-中文提示词让 DeepSeek 卡死？我把 Codex MCP 修好了
+我把 DeepSeek V4 部署进 Codex 了：Sol 总控，还能自动路由 Pro / Flash
 
 # 正文
 
-我遇到一个很隐蔽的问题：
+这次开源的重点不是“修了一个 Bug”，而是把 DeepSeek V4 真正变成 Codex 里的异步专家：
 
-同一个 `deepseek_start`，英文提示词不到 1 秒就返回 `job_id`，换成中文后却能一直转圈，直到 660 秒超时。
+- Sol 负责需求、规划、权限、综合、验证和最终回答；
+- Luna 负责本地仓库、命令和明确可验收的执行；
+- DeepSeek V4 Flash 负责低成本快速检查；
+- DeepSeek V4 Pro 负责数学、算法、架构、复杂调试和独立审查。
 
-一开始很像 DeepSeek 推理慢，实际请求根本没到 DeepSeek。
+调用不会再黑盒卡几分钟：
 
-根因是编码错位：Codex 的 stdio MCP 发 UTF-8，而 Windows PowerShell 5.1 在中文系统上可能按 CP936 读取 stdin。中文 JSON-RPC 被读坏后，服务端返回的是：
+1. `deepseek_start` 立即返回 `job_id`；
+2. DeepSeek 在后台通过 SSE 推理；
+3. `deepseek_poll` 每 30 秒返回一次当前阶段，终态会提前返回；
+4. Sol 拿到结果后独立复核，再给最终结论。
 
-`id=null / -32700 Parse error`
+我还补了两层“别浪费 token”保护：
 
-客户端还在等原来的请求 id，所以表现为“工具卡死”。
+- `max_tokens` 不再固定给一个容易截断的小值，而是按推理强度自动给 16K / 32K / 64K，并用 `final_answer_max_chars` 单独控制答案长度；
+- 如果长答案超过 Codex 单次工具输出窗口，用 `deepseek_read` 从本地分页续读，不会重新请求 DeepSeek，也不会重复消耗 API token。
 
-最终修法没有继续依赖 Console 编码设置，而是：
+如果 DeepSeek 自己返回 `finish_reason=length`，任务会明确标成 `INCOMPLETE`，不会再伪装成成功然后让 Sol 整题重跑。
 
-1. 直接读 stdin 原始字节；
-2. 按 LF 分帧；
-3. 显式用 UTF-8 解码；
-4. `deepseek_start` 立即返回 `job_id`；
-5. 后台跑 DeepSeek SSE，用 `deepseek_poll` 每 5 秒显示阶段。
+项目同时保留了 Windows PowerShell 5.1 的中文 UTF-8 MCP 兼容层，解决 `id=null / -32700 Parse error`。
 
-我把安装器、Codex Skill、无 API 回归测试、真实流式测试和 GitHub Actions 都整理开源了。
-
-回归标准不是“版本号看起来对”，而是中文请求必须保留 `id=2` 并进入方法分派。旧版会稳定复现 `id=null / -32700`，修复版通过。
+安装器、Codex Skill、无 API 回归测试、真实 SSE 测试和 GitHub Actions 都已整理好。
 
 GitHub：Master-1st/codex-deepseek-visible-stream
 
-如果你也在 Windows 上给 Codex 接 DeepSeek，并遇到中文提示词卡住，可以直接用这个 Skill。安装后记得完全退出并重启 Codex，旧 MCP 进程不会自动重载。
-
 # 标签
 
-#Codex #DeepSeek #MCP #PowerShell #UTF8 #AI编程 #开源项目 #Windows开发 #程序员日常 #Debug
+#Codex #DeepSeek #MCP #AI编程 #开源项目 #Agent #PowerShell #Windows开发 #程序员日常

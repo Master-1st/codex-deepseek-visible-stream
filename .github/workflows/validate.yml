@@ -38,11 +38,20 @@ jobs:
             -File '.\deepseek-visible-stream\scripts\Test-Utf8-Input-Regression.ps1' `
             -TargetServerPath '.\deepseek-visible-stream\scripts\source\server.ps1'
 
+      - name: Validate routing and output contracts
+        shell: powershell
+        run: |
+          powershell.exe -NoLogo -NoProfile -NonInteractive `
+            -ExecutionPolicy Bypass `
+            -File '.\deepseek-visible-stream\scripts\Test-Control-Plane-Contract.ps1' `
+            -TargetServerPath '.\deepseek-visible-stream\scripts\source\server.ps1'
+
       - name: Smoke-test installer output
         shell: powershell
         run: |
           $env:CODEX_HOME = Join-Path $env:RUNNER_TEMP 'codex-home'
           $env:DEEPSEEK_INSTALL_NO_GUI = '1'
+          $env:DEEPSEEK_INSTALL_ISOLATED = '1'
           powershell.exe -NoLogo -NoProfile -NonInteractive `
             -ExecutionPolicy Bypass `
             -File '.\deepseek-visible-stream\scripts\Install-DeepSeek-Visible-Stream-Hotfix3.ps1'
@@ -50,4 +59,9 @@ jobs:
           powershell.exe -NoLogo -NoProfile -NonInteractive `
             -ExecutionPolicy Bypass `
             -File '.\deepseek-visible-stream\scripts\Test-Utf8-Input-Regression.ps1' `
+            -TargetServerPath (Join-Path $env:CODEX_HOME 'deepseek-mcp\server.ps1')
+
+          powershell.exe -NoLogo -NoProfile -NonInteractive `
+            -ExecutionPolicy Bypass `
+            -File '.\deepseek-visible-stream\scripts\Test-Control-Plane-Contract.ps1' `
             -TargetServerPath (Join-Path $env:CODEX_HOME 'deepseek-mcp\server.ps1')

@@ -200,6 +200,10 @@ try {
         if ($pollText -match 'DeepSeek JOB FAILED') {
             throw 'Visible streaming job failed.'
         }
+
+        if ($pollText -match 'DeepSeek JOB INCOMPLETE') {
+            throw 'Visible streaming job exhausted its output budget.'
+        }
     }
 
     throw 'Visible streaming test timed out after 60 seconds.'
