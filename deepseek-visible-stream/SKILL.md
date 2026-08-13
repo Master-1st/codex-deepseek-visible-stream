@@ -1,25 +1,26 @@
 ---
 name: deepseek-visible-stream
-description: Install, repair, validate, and operate a visible asynchronous DeepSeek V4 MCP worker for Codex on Windows PowerShell 5.1. Use when users ask to connect DeepSeek V4 Pro or Flash, add deepseek_start/deepseek_poll streaming, check DeepSeek connectivity, fix Chinese or CJK prompt hangs, diagnose JSON-RPC id=null / -32700 Parse error, correct CP936-versus-UTF-8 stdin handling, or install/upgrade DeepSeek Visible Stream Hotfix 3.3.
+description: Deploy and operate DeepSeek V4 Pro and Flash inside Codex as asynchronous MCP specialists with explicit Sol-Luna-DeepSeek routing, 30-second visible polling, output-budget protection, zero-API-token local answer paging, and Windows PowerShell 5.1 UTF-8 compatibility. Use when users ask Sol to call DeepSeek, install DeepSeek in Codex, route work among Sol, Luna, and DeepSeek, inspect DeepSeek connectivity, avoid truncated long answers, or repair Chinese and CJK MCP input failures.
 ---
 
-# DeepSeek Visible Stream
+# DeepSeek Codex Router
 
-Use the bundled scripts to install and verify a Windows stdio MCP server that starts DeepSeek SSE jobs immediately, exposes visible polling, and decodes JSON-RPC stdin from raw UTF-8 bytes.
+Deploy DeepSeek V4 inside Codex as a bounded specialist. Keep Sol in control of intent, permissions, planning, integration, verification, and the final answer.
 
-Keep Sol or the current primary agent responsible for scope, synthesis, local verification, and the final answer. Treat DeepSeek as an independent specialist.
+## Route work
 
-## Workflow
+- Keep ambiguous requirements, architecture decisions, cross-worker coordination, safety judgments, integration, and the user-facing conclusion with Sol.
+- Route local repository inspection, tool execution, mechanical edits, and bounded verifiable work to Luna when available.
+- Route routine independent checks, low-cost analysis, and latency-sensitive work to DeepSeek V4 Flash.
+- Route mathematics, algorithms, architecture, complex debugging, adversarial review, and critical research to DeepSeek V4 Pro.
+- Route Chinese drafting, rewriting, translation, polishing, and summarization to DeepSeek by default. Use Flash for routine text and Pro for academic, quality-first, or critical text; Sol verifies facts and performs the final integration.
+- Give DeepSeek a self-contained task packet. It has no implicit access to local files, tools, or conversation history.
+- Never create Luna-to-DeepSeek or DeepSeek-to-Luna recursive chains.
+
+## Install and validate
 
 1. Confirm the host is Windows and the MCP command uses Windows PowerShell 5.1 (`powershell.exe`).
-2. Run the no-API UTF-8 regression before changing files when an existing server is available:
-
-   ```powershell
-   powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\Test-Utf8-Input-Regression.ps1
-   ```
-
-   A healthy server preserves `id=2` and reaches method dispatch. The affected implementation returns `id=null` with JSON-RPC error `-32700`.
-3. Install or upgrade with the bundled installer. It backs up the existing server, worker, and Codex config before writing:
+2. Install or upgrade with the bundled installer. The legacy Hotfix3 filename is retained for in-place upgrades:
 
    ```powershell
    $env:DEEPSEEK_INSTALL_NO_GUI = '1'
@@ -27,41 +28,65 @@ Keep Sol or the current primary agent responsible for scope, synthesis, local ve
    ```
 
    For an interactive install, run `scripts\Install-DeepSeek-Visible-Stream-Hotfix3.cmd`.
-4. Fully exit and restart Codex or ChatGPT. MCP servers are long-lived; replacing the file does not reload the already-running process.
-5. Re-run `Test-Utf8-Input-Regression.ps1` in an ordinary user process. Do not treat a version string alone as proof.
-6. Check API connectivity with `deepseek_status`.
-7. Run the real streaming integration test when a configured API key and one low-cost call are acceptable:
+3. Fully exit and restart Codex or ChatGPT. MCP servers are long-lived; replacing a file does not reload an existing process.
+4. Run the no-API regressions:
 
    ```powershell
-   powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\Test-DeepSeek-Visible-Streaming.ps1
+   powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\Test-Utf8-Input-Regression.ps1
+   powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\Test-Control-Plane-Contract.ps1
    ```
 
-## Operate DeepSeek visibly
+5. Call `deepseek_status` to validate the configured key and API connectivity.
+6. When one low-cost real API call is acceptable, run `scripts\Test-DeepSeek-Visible-Streaming.ps1`.
 
-For work that may exceed a few seconds:
+## Operate visibly
 
-1. Call `deepseek_start` with a self-contained prompt, explicit model, reasoning effort, and token limit.
-2. Report the returned `job_id` immediately.
-3. Call `deepseek_poll(job_id, wait_seconds=5)` until the state is terminal.
-4. Give compact updates when `phase` changes or roughly every 10-15 seconds.
-5. On `completed`, independently verify and synthesize the result.
-6. On `failed`, report the worker error exactly enough to diagnose it; do not silently retry expensive calls.
+1. Call `deepseek_start` with a self-contained prompt plus task metadata. Prefer `model=auto` so the routing rules select Flash or Pro. Use `task_type=chinese_writing`, `translation`, `polishing`, `writing`, or `summarization` for text work.
+2. Report the returned `job_id`, selected model, reasoning effort, and effective budget immediately.
+3. Call `deepseek_poll(job_id, wait_seconds=30)` until the state is terminal. Each call waits 30 seconds and returns earlier only when the job completes, fails, is cancelled, or becomes incomplete.
+4. Give one compact user update per returned poll. Do not continuously poll between those 30-second windows.
+5. On `completed`, independently verify DeepSeek's result and synthesize it as Sol.
+6. On `failed`, report the useful worker error and diagnose before retrying.
 
-Prefer `deepseek_start` plus `deepseek_poll` over synchronous `deepseek_consult` for long work.
+Prefer `deepseek_start` plus `deepseek_poll` over synchronous `deepseek_consult`.
 
-## Diagnose
+## Protect output and token spend
 
-- `id=null`, `code=-32700`, or Chinese-only hangs: verify the server reads raw stdin bytes until LF and decodes with `UTF8Encoding(false)`. Do not rely on PowerShell's default console code page.
-- `deepseek_start` times out and no job directory appears: the request did not reach `New-DeepSeekJob`; inspect MCP process reload, stdio transport, and active server path.
-- Version mismatch: reinstall, then fully restart the app. Hotfix 3.3 reports `3.3.3-0813-hotfix3-utf8-raw`.
-- `deepseek_status` fails: check `DEEPSEEK_API_KEY`, `DEEPSEEK_NETWORK_MODE`, proxy settings, TLS, and the returned HTTP error without printing credentials.
-- A job exists but fails: inspect its `state.json` and worker error. Separate transport parsing from API/SSE failures.
+- Omit `max_tokens` for normal calls. The router automatically uses 16K with thinking disabled, 32K for high effort, and 64K for max effort. `max_tokens` is a shared hard ceiling for hidden reasoning and final content, so a small explicit value can starve the answer.
+- Use `final_answer_max_chars` to request the desired final-answer length. The default is 12,000 characters; the accepted range is 1,000-60,000.
+- Treat `status=incomplete` or `finish_reason=length` as incomplete, never as success. Preserve any partial answer. Do not rerun the full reasoning task automatically.
+- If missing material is essential, make at most one targeted continuation with `thinking=false`, supplying the partial answer and asking only for the missing sections.
+- A terminal poll returns at most 24,000 answer characters. If `answer_eof=false`, call `deepseek_read(job_id, offset_chars=answer_next_offset)` until `eof=true`. `deepseek_read` reads the local answer file, makes no DeepSeek API request, and consumes no DeepSeek tokens.
+- When the MCP tool is invoked through Code Mode `functions.exec`, give the terminal poll/read enough host-side capture budget, for example:
 
-## Safety and verification
+  ```javascript
+  // @exec: {"yield_time_ms": 35000, "max_output_tokens": 12000}
+  const result = await tools.deepseek_poll({job_id, wait_seconds: 30});
+  text(result);
+  ```
+
+  Host capture size and DeepSeek `max_tokens` are different limits. Use local paging if the host still clips a result.
+
+## Interpret states
+
+- `queued`, `connecting`, `waiting_for_inference`: request setup and API connection.
+- `thinking`: DeepSeek is reasoning; expose only counts, never raw `reasoning_content`.
+- `answering`: final content is being persisted locally.
+- `completed`: natural completion; the answer and usage are ready.
+- `incomplete`: the shared output budget ended before a natural stop; partial content is preserved.
+- `failed`, `cancelled`: terminal error or explicit cancellation.
+
+## Diagnose compatibility
+
+- `id=null`, `code=-32700`, or Chinese-only hangs: verify the server reads raw stdin bytes through LF and decodes them with UTF-8. Do not rely on the PowerShell 5.1 console code page.
+- `deepseek_start` times out and no job directory appears: the request did not reach job creation. Inspect MCP reload, stdio transport, and the active server path.
+- Version mismatch: reinstall, fully restart the app, and verify `3.4.0-0813-codex-router-budget`.
+- `deepseek_status` fails: inspect `DEEPSEEK_NETWORK_MODE`, proxy/TLS configuration, and the returned HTTP error without printing credentials.
+
+## Safety
 
 - Never print, copy, or commit `DEEPSEEK_API_KEY`.
 - Preserve unrelated `config.toml` content. The installer updates only its tagged MCP block.
-- Do not broadly kill every PowerShell process. Identify exact worker or MCP PIDs first.
-- Do not expose raw `reasoning_content`; report phase and character counts.
-- Treat `scripts/source/server.ps1` and `scripts/source/stream-worker.ps1` as audit copies. The installer is the tested deployment entry point.
-- Require a passing raw UTF-8 regression after every input-path change.
+- Do not broadly terminate PowerShell processes. Identify exact MCP or worker PIDs first.
+- Do not expose raw reasoning content. Counts and phase are sufficient.
+- Treat `scripts/source/server.ps1` and `scripts/source/stream-worker.ps1` as audit copies; the installer is the deployment entry point.

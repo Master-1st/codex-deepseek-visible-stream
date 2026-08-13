@@ -1,4 +1,4 @@
 interface:
-  display_name: "DeepSeek Visible Stream"
-  short_description: "Fix and validate DeepSeek MCP streaming on Windows"
-  default_prompt: "Use $deepseek-visible-stream to install or diagnose visible DeepSeek MCP streaming and Chinese UTF-8 prompt timeouts on Windows."
+  display_name: "DeepSeek Codex Router"
+  short_description: "Deploy and route DeepSeek V4 inside Codex"
+  default_prompt: "Use $deepseek-visible-stream to deploy DeepSeek V4 in Codex, route Chinese text and specialist analysis to Flash or Pro under Sol control, poll every 30 seconds, and retrieve long answers without paid reruns."
