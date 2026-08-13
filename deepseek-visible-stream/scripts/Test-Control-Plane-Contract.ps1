@@ -216,6 +216,16 @@ try {
         $true
     )
 
+    # Some Windows PowerShell/.NET hosts prefix redirected stdin with a BOM.
+    # Make that transport variant deterministic in this contract test.
+    $inputPreamble = (New-Object System.Text.UTF8Encoding($true)).GetPreamble()
+    $process.StandardInput.BaseStream.Write(
+        $inputPreamble,
+        0,
+        $inputPreamble.Length
+    )
+    $process.StandardInput.BaseStream.Flush()
+
     $initialize = [ordered]@{
         jsonrpc = '2.0'
         id = 1

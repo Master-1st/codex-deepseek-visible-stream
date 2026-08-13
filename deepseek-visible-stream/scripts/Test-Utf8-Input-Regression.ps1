@@ -20,7 +20,10 @@ $selectedServerPath = if (-not [string]::IsNullOrWhiteSpace($TargetServerPath)) 
 }
 
 function Invoke-Probe {
-    param([Parameter(Mandatory = $true)][string]$ProbeServerPath)
+    param(
+        [Parameter(Mandatory = $true)][string]$ProbeServerPath,
+        [bool]$IncludeBom = $false
+    )
 
     Write-Host "Server under test: $ProbeServerPath"
 
@@ -43,9 +46,16 @@ function Invoke-Probe {
         $_ | ConvertTo-Json -Depth 8 -Compress
     }
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    $requestBytes = $utf8NoBom.GetBytes(
+    $requestBytes = [byte[]]$utf8NoBom.GetBytes(
         ($jsonLines -join "`n") + "`n"
     )
+
+    if ($IncludeBom) {
+        $utf8Bom = New-Object System.Text.UTF8Encoding($true)
+        $requestBytes = [byte[]](
+            $utf8Bom.GetPreamble() + $requestBytes
+        )
+    }
     $requestPath = Join-Path (
         [IO.Path]::GetTempPath()
     ) ('deepseek-utf8-' + [guid]::NewGuid().ToString('N') + '.jsonl')
@@ -118,26 +128,30 @@ if (-not (Test-Path -LiteralPath $selectedServerPath -PathType Leaf)) {
     throw "Missing patched or installed server: $selectedServerPath"
 }
 
-$responses = Invoke-Probe -ProbeServerPath $selectedServerPath
+foreach ($includeBom in @($false, $true)) {
+    $responses = Invoke-Probe `
+        -ProbeServerPath $selectedServerPath `
+        -IncludeBom $includeBom
 
-if ($responses.Count -ne 1) {
-    throw "Expected 1 JSON-RPC response, got $($responses.Count)."
-}
+    if ($responses.Count -ne 1) {
+        throw "Expected 1 JSON-RPC response, got $($responses.Count)."
+    }
 
-$dispatchResponse = $responses | Where-Object {
-    [string]$_.id -eq '2'
-} | Select-Object -First 1
+    $dispatchResponse = $responses | Where-Object {
+        [string]$_.id -eq '2'
+    } | Select-Object -First 1
 
-if (
-    ($null -eq $dispatchResponse) -or
-    ([int]$dispatchResponse.error.code -ne -32601)
-) {
-    throw (
-        'UTF-8 request was not parsed correctly. Expected id=2 and ' +
-        'error=-32601, received: ' +
-        ($responses | ConvertTo-Json -Depth 8 -Compress)
-    )
+    if (
+        ($null -eq $dispatchResponse) -or
+        ([int]$dispatchResponse.error.code -ne -32601)
+    ) {
+        throw (
+            'UTF-8 request was not parsed correctly. Expected id=2 and ' +
+            'error=-32601, received: ' +
+            ($responses | ConvertTo-Json -Depth 8 -Compress)
+        )
+    }
 }
 
 Write-Host 'UTF-8 MCP input regression PASSED.' -ForegroundColor Green
-Write-Host 'Chinese JSON-RPC request preserved id=2 and reached dispatch.'
+Write-Host 'Chinese JSON-RPC request reached dispatch with and without an optional UTF-8 BOM.'

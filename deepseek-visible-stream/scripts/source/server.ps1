@@ -8,6 +8,7 @@ $OutputEncoding = [Console]::OutputEncoding = New-Object System.Text.UTF8Encodin
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $RpcInput = [Console]::OpenStandardInput()
 $RpcInputBuffer = New-Object System.Collections.Generic.List[byte]
+$RpcInputFirstLine = $true
 
 function Read-Utf8StdinLine {
     while ($true) {
@@ -32,7 +33,17 @@ function Read-Utf8StdinLine {
 
     $bytes = $RpcInputBuffer.ToArray()
     $RpcInputBuffer.Clear()
-    return $utf8NoBom.GetString($bytes)
+    $text = $utf8NoBom.GetString($bytes)
+
+    if ($script:RpcInputFirstLine) {
+        $script:RpcInputFirstLine = $false
+
+        while (($text.Length -gt 0) -and ($text[0] -eq [char]0xFEFF)) {
+            $text = $text.Substring(1)
+        }
+    }
+
+    return $text
 }
 
 $ServerRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
