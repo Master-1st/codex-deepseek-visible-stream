@@ -115,8 +115,8 @@ function Invoke-Probe {
     }
     finally {
         if (-not $process.HasExited) {
-            $process.Kill()
-            $process.WaitForExit()
+            try { $process.Kill() } catch {}
+            try { $process.WaitForExit() } catch {}
         }
 
         $process.Dispose()
